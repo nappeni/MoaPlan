@@ -41,3 +41,11 @@ PostgreSQL 백업과 ENCRYPTION_KEY를 함께 안전하게 보관한다. JSON �
 npm test: 로그인/세션, 단체 간 격리, 출처 검증, 동시 저장, 암호화, 입력 검증, 이미지 최적화.
 npm run build: 운영용 프런트엔드 생성.
 외부 서비스 실호출 및 실제 PostgreSQL 접속 검증은 계정/서버 설정 이후 수행한다.
+
+## Supabase PostgreSQL
+
+Use the Session pooler URI for the local IPv4 backend. Set DATABASE_URL and DATABASE_SSL_CA_FILE to the downloaded Supabase CA certificate path. Keep ENCRYPTION_KEY identical to the original local key when migrating encrypted settings. Never commit these values.
+
+The server stores its initial JSONB state in moaplan_private.moaplan_state, with RLS enabled and access revoked from PUBLIC, anon and authenticated. This is a server-only store, not a browser Data API. Existing public.moaplan_state installations must be explicitly migrated before upgrading; the server does not automatically move old tables.
+
+For local-file migration, stop the server, back up state.json and encryption.key, refuse to overwrite a populated destination, copy the entire state in a transaction, compare the result, and only then switch DATABASE_URL. Local backups under .local must be protected alongside the encryption key. Supabase provides the database; the Node web server still needs hosting for public deployment.

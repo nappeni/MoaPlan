@@ -21,7 +21,8 @@ export default function SettingsPage({ data, refresh, notify }) {
   async function save() {
     setBusy('save');
     try {
-      const v = await api('/settings', 'PUT', { settings: s, secrets, clearSecrets: clear });
+      const { secrets: registrationStatus, logoId, ...settings } = s;
+      const v = await api('/settings', 'PUT', { settings, secrets, clearSecrets: clear });
       setS(v);
       setSecrets({});
       setClear([]);

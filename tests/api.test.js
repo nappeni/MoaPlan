@@ -148,6 +148,19 @@ test('API isolates organizations and preserves activity, secrets and session inv
   );
   assert.equal(set.status, 200);
   assert.equal(set.data.secrets.aiKey, true);
+  const fullSettings = await req(
+    '/settings',
+    'PUT',
+    {
+      settings: { ...set.data, r2Bucket: 'test-bucket' },
+      secrets: {},
+      clearSecrets: [],
+    },
+    ca,
+  );
+  assert.equal(fullSettings.status, 200);
+  assert.equal(fullSettings.data.r2Bucket, 'test-bucket');
+  assert.equal(fullSettings.data.secrets.aiKey, true);
   assert.equal(JSON.stringify(set.data).includes('not-a-real-key'), false);
   const disk = await fs.readFile(path.join(dir, 'state.json'), 'utf8');
   assert.equal(disk.includes('not-a-real-key'), false);

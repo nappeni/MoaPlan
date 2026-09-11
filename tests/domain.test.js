@@ -1,3 +1,6 @@
+import {setImageProcessor} from '../server/images.js';
+import {optimize as nodeOptimize} from '../server/images-node.js';
+setImageProcessor(nodeOptimize);
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';

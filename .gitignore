@@ -6,3 +6,10 @@ dist/
 .local/
 coverage/
 *.log
+
+# Local credentials reference - never publish
+docs/MoaPlan_env.txt
+
+.wrangler/
+supabase/.temp/
+supabase/functions/node_modules/

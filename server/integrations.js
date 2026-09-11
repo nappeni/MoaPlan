@@ -5,7 +5,8 @@ import {
   HeadBucketCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import sharp from 'sharp';
+import { optimize } from './images.js';
+export { optimize } from './images.js';
 import { randomUUID } from 'node:crypto';
 import { decrypt } from './security.js';
 import { publicActivity, calendarEvent } from './domain.js';
@@ -104,22 +105,8 @@ export function r2(s) {
     credentials: { accessKeyId: s.r2AccessKeyId, secretAccessKey: s.r2SecretAccessKey },
   });
 }
-export async function optimize(buffer) {
-  let out;
-  for (const q of [85, 78, 70]) {
-    out = await sharp(buffer, { limitInputPixels: 40000000 })
-      .rotate()
-      .resize({ width: 1080, height: 1350, fit: 'inside', withoutEnlargement: true })
-      .flatten({ background: '#ffffff' })
-      .jpeg({ quality: q, mozjpeg: true })
-      .toBuffer();
-    if (out.length <= 500 * 1024) break;
-  }
-  const thumb = await sharp(out).resize({ width: 320 }).webp({ quality: 65 }).toBuffer();
-  return { out, thumb };
-}
 export async function uploadImage(s, orgId, activityId, buffer) {
-  const { out, thumb } = await optimize(buffer);
+  const { out, thumb, width } = await optimize(buffer);
   const id = randomUUID();
   const key = orgId + '/' + activityId + '/' + id + '.jpg',
     thumbKey = orgId + '/' + activityId + '/' + id + '.webp';
@@ -140,7 +127,7 @@ export async function uploadImage(s, orgId, activityId, buffer) {
     key,
     thumbKey,
     bytes: out.length,
-    width: (await sharp(out).metadata()).width,
+    width,
     createdAt: new Date().toISOString(),
   };
 }

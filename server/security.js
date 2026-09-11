@@ -22,7 +22,7 @@ export function checkPassword(p, s) {
   }
 }
 export async function encryptionKey(dir) {
-  await fs.mkdir(dir, { recursive: true });
+  if (!process.env.ENCRYPTION_KEY) await fs.mkdir(dir, { recursive: true });
   let k = process.env.ENCRYPTION_KEY;
   if (!k) {
     if (process.env.NODE_ENV === 'production') throw new Error('ENCRYPTION_KEY is required');

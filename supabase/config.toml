@@ -1,0 +1,6 @@
+project_id = "moaplan"
+
+[functions.moaplan-api]
+verify_jwt = false
+entrypoint = "./functions/moaplan-api/index.ts"
+import_map = "./functions/deno.json"
