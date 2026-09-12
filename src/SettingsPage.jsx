@@ -1,3 +1,4 @@
+import { prepareImage } from './image-upload.js';
 import React, { useState, useEffect } from 'react';
 import { Save, Plug, CheckCircle2, ExternalLink, Download, ShieldCheck } from 'lucide-react';
 import { api } from './api';
@@ -145,12 +146,7 @@ export default function SettingsPage({ data, refresh, notify }) {
                       return notify('15MB 이하 이미지를 선택해 주세요.');
                     setBusy('logo');
                     try {
-                      const value = await new Promise((resolve, reject) => {
-                        const r = new FileReader();
-                        r.onload = () => resolve(r.result);
-                        r.onerror = reject;
-                        r.readAsDataURL(file);
-                      });
+                      const value = await prepareImage(file);
                       const v = await api('/logo', 'POST', { data: value });
                       setS((s) => ({ ...s, logoId: v.logoId }));
                       await refresh();

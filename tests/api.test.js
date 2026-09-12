@@ -18,6 +18,7 @@ test('API isolates organizations and preserves activity, secrets and session inv
       DATA_DIR: dir,
       DATABASE_URL: '',
       NODE_ENV: 'test',
+      MOAPLAN_WORKER_ENABLED: 'false',
       SETUP_TOKEN: 'test-only-setup',
       ENCRYPTION_KEY: randomBytes(32).toString('hex'),
     },

@@ -125,5 +125,5 @@ export async function drawCard(canvas, slide, settings, index, total, background
 export async function cardData(slide, settings, index, total, background, activity) {
   const canvas = document.createElement('canvas');
   await drawCard(canvas, slide, settings, index, total, background, activity);
-  return canvas.toDataURL('image/jpeg', 0.88);
+  return canvas.toDataURL('image/jpeg', 0.78);
 }

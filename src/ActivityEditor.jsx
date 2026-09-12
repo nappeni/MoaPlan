@@ -1,3 +1,4 @@
+import { prepareImage } from './image-upload.js';
 import React, { useState } from 'react';
 import {
   ArrowLeft,
@@ -512,12 +513,7 @@ export default function ActivityEditor({ initial, data, notify, refresh, onSaved
                     return notify('15MB 이하 이미지를 선택해 주세요.');
                   setBusy('attachment');
                   try {
-                    const value = await new Promise((resolve, reject) => {
-                      const r = new FileReader();
-                      r.onload = () => resolve(r.result);
-                      r.onerror = reject;
-                      r.readAsDataURL(file);
-                    });
+                    const value = await prepareImage(file);
                     const asset = await api('/activities/' + a.id + '/assets', 'POST', {
                       data: value,
                     });

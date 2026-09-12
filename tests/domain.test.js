@@ -94,7 +94,7 @@ test('image optimization bounds dimensions and creates small thumbnail', async (
   assert.equal(meta.format, 'jpeg');
   assert.equal(meta.width, 1080);
   assert.equal(meta.height, 1350);
-  assert.ok(out.length < 500 * 1024);
+  assert.ok(out.length < 300 * 1024);
   assert.equal((await sharp(thumb).metadata()).format, 'webp');
-  assert.equal((await sharp(thumb).metadata()).width, 320);
+  assert.equal((await sharp(thumb).metadata()).width, 160);
 });

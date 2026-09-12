@@ -4,12 +4,13 @@ setImageProcessor(optimize);
 import express from 'express';
 import path from 'node:path';
 import { createApp } from './app.js';
+import { startWorker } from './worker.js';
 const production = process.env.NODE_ENV === 'production';
 const port = Number(process.env.PORT || 5173);
 const appUrl = (process.env.APP_URL || 'http://localhost:' + port).replace(/\/$/, '');
 const { app, store, work } = await createApp({ production, appUrl });
-const interval = setInterval(work, 10000);
-interval.unref();
+const interval = startWorker(work);
+console.log(interval ? 'Scheduled publishing: enabled' : 'Scheduled publishing: disabled');
 if (production) {
   app.use(express.static(path.resolve('dist')));
   app.get('/{*path}', (req, res) => res.sendFile(path.resolve('dist/index.html')));

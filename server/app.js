@@ -1,3 +1,6 @@
+import { runPublishStep } from './publish-job.js';
+import { consumeAttempt } from './rate-limit.js';
+import { Buffer } from 'node:buffer';
 import express from 'express';
 import helmet from 'helmet';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
@@ -66,17 +69,13 @@ export async function createApp({
     });
     setCookie(res, v);
   }
-  const attempts = new Map();
-  function rate(req, res, next) {
-    const k = req.ip;
-    const now = Date.now();
-    for (const [id, v] of attempts) if (v.until < now) attempts.delete(id);
-    const v = attempts.get(k) || { count: 0, until: now + 900000 };
-    if (++v.count > 30)
+  const rate = wrap(async (req, res, next) => {
+    if (!await consumeAttempt(store, hash(req.ip || 'unknown'))) {
+      res.setHeader('Retry-After', '900');
       return res.status(429).json({ error: '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.' });
-    attempts.set(k, v);
+    }
     next();
-  }
+  });
   app.get(
     '/api/health',
     wrap(async (req, res) => {
@@ -655,6 +654,8 @@ export async function createApp({
           const s = integration.credentials(o, key);
           if (!s.instagramToken || !s.instagramUserId)
             throw fail('인스타그램 계정을 먼저 설정해 주세요.');
+          if (process.env.MOAPLAN_WORKER_ENABLED !== 'true')
+            throw fail('자동 게시가 아직 활성화되지 않았습니다. 연결 검증 후 사용할 수 있습니다.', 503);
           const at = req.body.scheduledAt ? new Date(req.body.scheduledAt) : new Date();
           if (!Number.isFinite(at.getTime()) || (req.body.scheduledAt && at.getTime() < Date.now()))
             throw fail('미래의 예약 시간을 선택해 주세요.');
@@ -662,6 +663,7 @@ export async function createApp({
           p.scheduledAt = at.toISOString();
           p.targetInstagramId = s.instagramUserId;
           p.jobId = randomUUID();
+          for (const field of ['stage','leaseId','leaseUntil','nextAt','containers','assetIndex','currentContainer','containerId','startedAt','error']) delete p[field];
           return a;
         }),
       );
@@ -716,77 +718,8 @@ export async function createApp({
       );
     }),
   );
-  let workerBusy = false;
   async function work() {
-    if (workerBusy) return;
-    workerBusy = true;
-    try {
-      const task = await store.transact((s) => {
-        for (const o of s.organizations)
-          for (const a of o.activities) {
-            const p = a.promotion;
-            if (p?.status === 'processing' && Date.now() - Date.parse(p.startedAt) > 10 * 60000) {
-              p.status = 'attention';
-              p.error = '처리가 중단되었습니다. Instagram에서 게시 여부를 확인해 주세요.';
-            }
-            if (p?.status === 'scheduled' && Date.parse(p.scheduledAt) <= Date.now()) {
-              if (p.stale || a.status !== 'confirmed') {
-                p.status = 'paused';
-                continue;
-              }
-              p.status = 'processing';
-              p.stage = 'preparing';
-              p.startedAt = new Date().toISOString();
-              return { org: o, a };
-            }
-          }
-        return null;
-      });
-      if (!task) return;
-      let publishing = false;
-      try {
-        const s = integration.credentials(task.org, key);
-        if (s.instagramUserId !== task.a.promotion.targetInstagramId)
-          throw fail('예약 후 게시 계정이 변경되었습니다.');
-        const result = await integration.publishInstagram(
-          s,
-          task.a.promotion,
-          async (container) => {
-            await store.transact((db) => {
-              const p = activity(
-                db.organizations.find((o) => o.id === task.org.id),
-                task.a.id,
-              ).promotion;
-              p.stage = 'publishing';
-              p.containerId = container;
-            });
-            publishing = true;
-          },
-        );
-        await store.transact((db) => {
-          const p = activity(
-            db.organizations.find((o) => o.id === task.org.id),
-            task.a.id,
-          ).promotion;
-          Object.assign(p, result, { status: 'published', publishedAt: new Date().toISOString() });
-        });
-      } catch (e) {
-        await store.transact((db) => {
-          const p = activity(
-            db.organizations.find((o) => o.id === task.org.id),
-            task.a.id,
-          ).promotion;
-          p.status = publishing ? 'attention' : 'failed';
-          p.error = publishing
-            ? '게시 결과가 불명확합니다. Instagram에서 확인 후 처리해 주세요.'
-            : e.message;
-        });
-      }
-    } catch (e) {
-      console.error('Worker error:', e.message);
-    } finally {
-      workerBusy = false;
-    }
+    return runPublishStep(store, org => integration.credentials(org, key), integration.instagramSteps);
   }
   app.use('/api', (req, res) => res.status(404).json({ error: '지원하지 않는 요청입니다.' }));
   app.use((err, req, res, next) => {

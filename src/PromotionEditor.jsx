@@ -1,3 +1,4 @@
+import { prepareImage } from './image-upload.js';
 import React, { useState, useRef, useEffect } from 'react';
 import {
   Sparkles,
@@ -124,12 +125,7 @@ export default function PromotionEditor({
     if (file.size > 15 * 1024 * 1024) return notify('15MB 이하 이미지를 선택해 주세요.');
     setBusy('upload');
     try {
-      const data = await new Promise((resolve, reject) => {
-        const r = new FileReader();
-        r.onload = () => resolve(r.result);
-        r.onerror = reject;
-        r.readAsDataURL(file);
-      });
+      const data = await prepareImage(file);
       const asset = await api('/activities/' + a.id + '/assets', 'POST', { data });
       changeSlide('backgroundId', asset.id);
       await refresh();

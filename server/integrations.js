@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import {
   S3Client,
   PutObjectCommand,
@@ -224,6 +225,7 @@ export async function ig(s, path, body) {
   if (!s.instagramToken || !/^\d+$/.test(s.instagramUserId) || !/^v\d+\.\d+$/.test(s.graphVersion))
     throw new Error('Instagram 계정 ID·토큰·API 버전을 확인해 주세요.');
   return jsonFetch('https://graph.instagram.com/' + s.graphVersion + '/' + path, {
+    signal: AbortSignal.timeout(20000),
     method: body ? 'POST' : 'GET',
     headers: {
       Authorization: 'Bearer ' + s.instagramToken,
@@ -232,43 +234,14 @@ export async function ig(s, path, body) {
     ...(body ? { body: new URLSearchParams(body) } : {}),
   });
 }
-async function ready(s, id) {
-  for (let i = 0; i < 30; i++) {
-    const status = await ig(s, id + '?fields=status_code');
-    if (status.status_code === 'FINISHED') return;
-    if (['ERROR', 'EXPIRED'].includes(status.status_code))
-      throw new Error('Instagram 이미지 처리에 실패했습니다.');
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-  throw new Error('Instagram 이미지 처리 시간이 초과되었습니다.');
-}
-export async function publishInstagram(s, p, beforePublish) {
-  const ids = [];
-  for (const asset of p.assets) {
-    const item = await ig(s, s.instagramUserId + '/media', {
-      image_url: await imageUrl(s, asset.key),
-      ...(p.assets.length > 1
-        ? { is_carousel_item: 'true' }
-        : { caption: p.caption + '\n\n' + p.hashtags }),
+export const instagramSteps = {
+  async create(s,p,index) {
+    return ig(s, s.instagramUserId + '/media', {
+      image_url: await imageUrl(s,p.assets[index].key),
+      ...(p.assets.length > 1 ? {is_carousel_item:'true'} : {caption:p.caption+'\n\n'+p.hashtags}),
     });
-    await ready(s, item.id);
-    ids.push(item.id);
-  }
-  let container = ids[0];
-  if (ids.length > 1) {
-    const c = await ig(s, s.instagramUserId + '/media', {
-      media_type: 'CAROUSEL',
-      children: ids.join(','),
-      caption: p.caption + '\n\n' + p.hashtags,
-    });
-    container = c.id;
-    await ready(s, container);
-  }
-  await beforePublish(container);
-  const published = await ig(s, s.instagramUserId + '/media_publish', { creation_id: container });
-  let permalink = '';
-  try {
-    permalink = (await ig(s, published.id + '?fields=permalink')).permalink;
-  } catch {}
-  return { mediaId: published.id, permalink };
-}
+  },
+  status: (s,id) => ig(s,id+'?fields=status_code'),
+  carousel: (s,p) => ig(s,s.instagramUserId+'/media',{media_type:'CAROUSEL',children:p.containers.join(','),caption:p.caption+'\n\n'+p.hashtags}),
+  publish: (s,id) => ig(s,s.instagramUserId+'/media_publish',{creation_id:id}),
+};

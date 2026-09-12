@@ -13,3 +13,5 @@ docs/MoaPlan_env.txt
 .wrangler/
 supabase/.temp/
 supabase/functions/node_modules/
+
+.DS_Store
