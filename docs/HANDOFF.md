@@ -1,3 +1,13 @@
+# 예약 기반 설치 결과 — 2026-09-13
+
+- 사용자 명시 승인 후 scripts/install-scheduler.mjs 실행 완료.
+- pg_cron/pg_net 설치, 동일 프로젝트 Vault에 프록시 비밀값 보관, 비공개 trigger_publishing_step 함수 및 10초 간격 Cron 등록 완료.
+- Cron active=false, Edge 예약 엔드포인트 503(비활성) 확인. anon/authenticated 역할의 함수 EXECUTE 권한 없음 확인.
+- 실제 게시·일정 등록은 실행하지 않음.
+- 개발 코드 커밋 f631b52는 로컬에 보존. GitHub 푸시는 로컬 인증 gomgom-code의 저장소 권한 부족(403), 연결된 nappeni GitHub 앱의 쓰기 권한 부족(403)으로 미완료. nappeni의 Git 쓰기 인증을 연결한 후 일반 push 필요. 전역 Git 인증은 변경하지 않음.
+
+---
+
 # 추가 개발 및 검증 — 2026-09-12
 
 - Pages: https://moaplan.pages.dev, 기존 계정의 로그인 세션 및 관리 화면 확인.
