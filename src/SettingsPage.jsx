@@ -1,3 +1,4 @@
+import { readView, writeView } from './view-state.js';
 import { prepareImage } from './image-upload.js';
 import React, { useState, useEffect } from 'react';
 import { Save, Plug, CheckCircle2, ExternalLink, Download, ShieldCheck } from 'lucide-react';
@@ -12,12 +13,16 @@ const groups = [
   ['storage', '이미지 저장소'],
 ];
 export default function SettingsPage({ data, refresh, notify }) {
-  const [tab, setTab] = useState('general'),
+  const [tab, setTab] = useState(() => {
+    const saved = readView('settingsTab', 'general');
+    return groups.some(([id]) => id === saved) ? saved : 'general';
+  }),
     [s, setS] = useState(data.settings),
     [secrets, setSecrets] = useState({}),
     [clear, setClear] = useState([]),
     [busy, setBusy] = useState(''),
     [calendars, setCalendars] = useState([]);
+  useEffect(() => { writeView('settingsTab', tab); }, [tab]);
   const change = (k, v) => setS({ ...s, [k]: v });
   async function save() {
     setBusy('save');
@@ -169,7 +174,19 @@ export default function SettingsPage({ data, refresh, notify }) {
                 'url',
               )}
               <div className="form-grid">
-                {input('color', '대표 색상', undefined, 'color')}
+                <Field label="대표 색상">
+                  <div className="color-field">
+                    <input
+                      type="color"
+                      aria-label="대표 색상"
+                      value={s.color || '#155f55'}
+                      onChange={(e) => change('color', e.target.value)}
+                    />
+                    <span className="color-value" aria-hidden="true">
+                      {(s.color || '#155f55').toUpperCase()}
+                    </span>
+                  </div>
+                </Field>
                 {input(
                   'grades',
                   '참석가능 등급',

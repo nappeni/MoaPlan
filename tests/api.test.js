@@ -144,11 +144,13 @@ test('API isolates organizations and preserves activity, secrets and session inv
   const set = await req(
     '/settings',
     'PUT',
-    { settings: { name: 'A 새 이름' }, secrets: { aiKey: 'not-a-real-key' } },
+    { settings: { name: 'A 새 이름', color: '#cb713a' }, secrets: { aiKey: 'not-a-real-key' } },
     ca,
   );
   assert.equal(set.status, 200);
   assert.equal(set.data.secrets.aiKey, true);
+  assert.equal(set.data.color, '#cb713a');
+  assert.equal((await req('/data', 'GET', undefined, ca)).data.settings.color, '#cb713a');
   const fullSettings = await req(
     '/settings',
     'PUT',
@@ -168,6 +170,92 @@ test('API isolates organizations and preserves activity, secrets and session inv
   const exp = await req('/export', 'GET', undefined, ca);
   assert.equal(JSON.stringify(exp.data).includes('not-a-real-key'), false);
   assert.equal((await req('/data', 'GET', undefined, cb)).data.settings.secrets.aiKey, false);
+  // Organization promotions are independent and stay private to their organization.
+  const campaign = await req(
+    '/promotions',
+    'POST',
+    { title: '단체 소개', description: '공개 가능한 단체 소개' },
+    ca,
+  );
+  assert.equal(campaign.status, 201);
+  const route = '/promotions/' + campaign.data.id;
+  const draft = {
+    caption: '소개 게시글',
+    hashtags: '#단체',
+    slides: [{ title: '소개', body: '함께해요' }],
+    assetIds: [],
+    sourceVersion: 1,
+  };
+  assert.equal((await req(route + '/promotion', 'PUT', draft, cb)).status, 404);
+  assert.equal(
+    (await req('/activities/' + campaign.data.id + '/promotion', 'PUT', draft, ca)).status,
+    404,
+  );
+  assert.equal((await req('/data', 'GET', undefined, cb)).data.promotions.length, 0);
+  assert.equal((await req('/data', 'GET', undefined, ca)).data.activities.length, 1);
+  const saved = await req(route + '/promotion', 'PUT', draft, ca);
+  assert.equal(saved.status, 200);
+  assert.equal(saved.data.promotion.status, 'draft');
+  assert.equal(
+    (await req(route + '/publish-step', 'POST', { jobId: 'unapproved' }, ca)).status,
+    409,
+  );
+  // Seed an image descriptor in the isolated test store; never contact R2 or Instagram.
+  const stateFile = path.join(dir, 'state.json');
+  const state = JSON.parse(await fs.readFile(stateFile, 'utf8'));
+  const item = state.organizations
+    .flatMap((o) => o.promotions || [])
+    .find((a) => a.id === campaign.data.id);
+  item.assets = [{ id: 'image', key: 'test-image' }];
+  await fs.writeFile(stateFile, JSON.stringify(state));
+  const rendered = await req(route + '/promotion', 'PUT', { ...draft, assetIds: ['image'] }, ca);
+  assert.equal(rendered.status, 200);
+  const approval = { approved: true, reviewedAt: rendered.data.promotion.updatedAt };
+  const missing = await req(route + '/publish', 'POST', approval, ca);
+  assert.equal(missing.status, 400);
+  assert.match(missing.data.error, /설정/);
+  await req(
+    '/settings',
+    'PUT',
+    {
+      settings: { instagramUserId: '12345', graphVersion: 'v22.0' },
+      secrets: { instagramToken: 'test-only-token' },
+    },
+    ca,
+  );
+  assert.equal((await req(route + '/publish', 'POST', {}, ca)).status, 409);
+  assert.equal(
+    (await req(route + '/publish', 'POST', { ...approval, reviewedAt: 'stale' }, ca)).status,
+    409,
+  );
+  assert.equal(
+    (
+      await req(
+        route + '/publish',
+        'POST',
+        { ...approval, scheduledAt: '2099-01-01T00:00:00Z' },
+        ca,
+      )
+    ).status,
+    503,
+  );
+  const queued = await req(route + '/publish', 'POST', approval, ca);
+  assert.equal(queued.status, 200);
+  assert.equal(queued.data.promotion.manual, true);
+  assert.equal(queued.data.promotion.approval.reviewedAt, approval.reviewedAt);
+  assert.ok(queued.data.promotion.approval.userId);
+  assert.ok(Number.isFinite(Date.parse(queued.data.promotion.approval.approvedAt)));
+  assert.equal(queued.data.promotion.status, 'scheduled');
+  assert.equal((await req(route + '/publish', 'POST', approval, ca)).status, 400);
+  assert.equal(
+    (await req(route + '/publish-step', 'POST', { jobId: queued.data.promotion.jobId }, cb)).status,
+    404,
+  );
+  assert.equal(
+    (await req(route + '/publish-step', 'POST', { jobId: 'wrong-job' }, ca)).status,
+    409,
+  );
+  assert.equal((await req(route + '/unpublish', 'POST', {}, ca)).status, 200);
   assert.equal((await req('/logout', 'POST', {}, ca)).status, 200);
   assert.equal((await req('/data', 'GET', undefined, ca)).status, 401);
   assert.equal(

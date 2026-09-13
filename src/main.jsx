@@ -1,3 +1,4 @@
+import { readView, writeView, clearView } from './view-state.js';
 import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
@@ -19,11 +20,15 @@ import { api, dateLabel, newActivity, newVenue, statusLabels, searchAddress } fr
 import { Button, Field, Badge, Empty } from './ui';
 import ActivityEditor from './ActivityEditor';
 import SettingsPage from './SettingsPage';
+import OrganizationPromotions from './OrganizationPromotions';
 import './style.css';
 function App() {
   const [session, setSession] = useState(null),
     [data, setData] = useState(null),
-    [page, setPage] = useState('activities'),
+    [page, setPage] = useState(() => {
+      const saved = readView('page', 'activities');
+      return ['activities','venues','promotions','settings'].includes(saved) ? saved : 'activities';
+    }),
     [selected, setSelected] = useState(null),
     [toast, setToast] = useState(''),
     [loading, setLoading] = useState(true);
@@ -39,7 +44,11 @@ function App() {
     try {
       const s = await api('/session');
       setSession(s);
-      if (s.user) await refresh();
+      if (s.user) {
+        const d = await refresh();
+        const saved = readView('activity');
+        setSelected(saved === 'new' ? { ...newActivity(), applicationUrl:d.settings.applicationUrl } : d.activities.find(a => a.id === saved) || null);
+      }
     } catch (e) {
       notify(e.message);
     } finally {
@@ -62,9 +71,15 @@ function App() {
     }, 30000);
     return () => clearInterval(t);
   }, [session?.user?.id]);
+  useEffect(() => { writeView('page', page); }, [page]);
+  useEffect(() => {
+    if (!loading && session?.user) writeView('activity', selected ? selected.id || 'new' : null);
+  }, [selected, loading, session?.user?.id]);
   async function logout() {
     try {
       await api('/logout', 'POST', {});
+      clearView();
+      setPage('activities');
       setData(null);
       setSelected(null);
       await initialize();
@@ -92,6 +107,7 @@ function App() {
   const nav = [
     ['activities', CalendarDays, '활동 기획'],
     ['venues', MapPin, '후보지 관리'],
+    ['promotions', ArrowUpRight, '단체 홍보'],
     ['settings', Settings, '단체 관리'],
   ];
   return (
@@ -209,6 +225,8 @@ function App() {
                   }
                 />
               )
+            ) : page === 'promotions' ? (
+              <OrganizationPromotions data={data} refresh={refresh} notify={notify} />
             ) : page === 'venues' ? (
               <Venues data={data} refresh={refresh} notify={notify} />
             ) : (
@@ -592,9 +610,13 @@ function Calendar({ month, setMonth, items, onSelect }) {
   );
 }
 function Venues({ data, refresh, notify }) {
-  const [editing, setEditing] = useState(null),
+  const [editing, setEditing] = useState(() => {
+      const saved = readView('venue');
+      return saved === 'new' ? newVenue() : data.venues.find(v => v.id === saved) || null;
+    }),
     [query, setQuery] = useState(''),
     [busy, setBusy] = useState(false);
+  useEffect(() => { writeView('venue', editing ? editing.id || 'new' : null); }, [editing]);
   const change = (k, v) => setEditing({ ...editing, [k]: v });
   async function save(e) {
     e.preventDefault();
@@ -622,17 +644,19 @@ function Venues({ data, refresh, notify }) {
           <h1>함께할 장소를 모아두세요</h1>
           <p>연락처와 협의 내용을 다음 활동에 연결합니다.</p>
         </div>
-        <Button kind="primary" onClick={() => setEditing(newVenue())}>
-          <Plus size={18} />
-          후보지 등록
-        </Button>
+        {!editing && (
+          <Button kind="primary" onClick={() => setEditing(newVenue())}>
+            <Plus size={18} />
+            후보지 등록
+          </Button>
+        )}
       </div>
       {editing ? (
         <form className="panel form-panel" onSubmit={save}>
           <div className="section-heading">
             <h2>{editing.id ? '후보지 수정' : '새 후보지'}</h2>
             <Button type="button" onClick={() => setEditing(null)}>
-              닫기
+              목록
             </Button>
           </div>
           <div className="form-grid">

@@ -1485,3 +1485,41 @@ hr {
   font-size: 0.93rem;
   color: #536f5d;
 }
+
+/* Color inputs need explicit swatch space: text-field padding collapses the native preview. */
+.color-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.color-field input[type="color"] {
+  width: 64px;
+  height: 44px;
+  min-height: 44px;
+  flex: 0 0 64px;
+  padding: 4px;
+  cursor: pointer;
+}
+.color-field input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+.color-field input[type="color"]::-webkit-color-swatch {
+  border: 0;
+  border-radius: 3px;
+}
+.color-field input[type="color"]::-moz-color-swatch {
+  border: 0;
+  border-radius: 3px;
+}
+.color-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .9rem;
+  color: #263f34;
+}
+
+fieldset.panel { min-width: 0; margin-inline: 0; }
+.saved-feed-preview { margin: 24px 0; padding: 20px; background: #f5f7f6; border-radius: 12px; }
+.feed-images { display: flex; gap: 12px; overflow-x: auto; padding: 8px 0; }
+.feed-images a { flex: 0 0 180px; }
+.feed-images img { display: block; width: 180px; height: 225px; object-fit: contain; border-radius: 8px; }
+.feed-caption { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; }

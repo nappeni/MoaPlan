@@ -1,3 +1,4 @@
+import { prepareSlides } from './promotion-slides.js';
 import { prepareImage } from './image-upload.js';
 import React, { useState, useRef, useEffect } from 'react';
 import {
@@ -16,9 +17,10 @@ import {
 import { api } from './api';
 import { Button, Field, Badge } from './ui';
 import { drawCard, cardData } from './artwork';
-const blankSlide = () => ({ title: '', body: '', visual: '' });
+const blankSlide = () => ({ role: 'content', title: '', body: '', visual: '' });
 export default function PromotionEditor({
   activity: a,
+  initialSuggestion,
   settings,
   dirty,
   notify,
@@ -26,27 +28,35 @@ export default function PromotionEditor({
   onSaved,
 }) {
   const p = a.promotion;
-  const [slides, setSlides] = useState(
-      p?.slides || [
-        {
-          title: a.title,
-          body: [a.startDate + ' ' + a.startTime, a.location, a.notice].filter(Boolean).join('\n'),
-          visual: '',
-        },
-      ],
+  const consentRecorded = !!p && ['scheduled', 'processing', 'published', 'attention'].includes(p.status)
+    && !!(p.approval || (p.manual && p.jobId));
+  const [briefTitle, setBriefTitle] = useState(a.title);
+  const [briefDescription, setBriefDescription] = useState(a.description || '');
+  const [generationError, setGenerationError] = useState('');
+  const base = (a.kind === 'organization' ? '/promotions/' : '/activities/') + a.id;
+  const instagramReady =
+    !!settings.secrets?.instagramToken &&
+    /^\d+$/.test(settings.instagramUserId || '') &&
+    /^v\d+\.\d+$/.test(settings.graphVersion || '');
+  const needsCover =
+    !!p?.slides?.length &&
+    p.slides[0].role !== 'cover' &&
+    !['scheduled', 'processing', 'published', 'attention'].includes(p.status);
+  const [slides, setSlides] = useState(() => prepareSlides(a, initialSuggestion)),
+    [caption, setCaption] = useState(initialSuggestion?.caption || p?.caption || ''),
+    [hashtags, setHashtags] = useState(
+      initialSuggestion?.hashtags || p?.hashtags || settings.hashtags,
     ),
-    [caption, setCaption] = useState(p?.caption || ''),
-    [hashtags, setHashtags] = useState(p?.hashtags || settings.hashtags),
     [index, setIndex] = useState(0),
-    [assetIds, setAssetIds] = useState(p?.assetIds || []),
+    [assetIds, setAssetIds] = useState(initialSuggestion || needsCover ? [] : p?.assetIds || []),
     [busy, setBusy] = useState(''),
-    [changed, setChanged] = useState(false),
-    [at, setAt] = useState(''),
+    [changed, setChanged] = useState(!!initialSuggestion || needsCover),
+    [publishError, setPublishError] = useState(''),
     [previewError, setPreviewError] = useState(''),
     [approved, setApproved] = useState(false);
   const canvas = useRef(null);
   const slide = slides[index] || slides[0];
-  const contentUrl = (id) => '/api/activities/' + a.id + '/assets/' + id + '/content';
+  const contentUrl = (id) => '/api' + base + '/assets/' + id + '/content';
   const changeSlide = (k, v) => {
     setSlides(slides.map((s, i) => (i === index ? { ...s, [k]: v } : s)));
     setAssetIds([]);
@@ -74,18 +84,23 @@ export default function PromotionEditor({
     return () => {
       cancelled = true;
     };
-  }, [slides, index, settings.color, settings.name]);
+  }, [slides, index, settings.color, settings.name, settings.logoId]);
   async function generatePlan() {
     if (changed && !confirm('현재 홍보 초안을 새 AI 추천으로 바꿀까요?')) return;
     setBusy('plan');
+    setGenerationError('');
     try {
-      const { suggestion: v } = await api('/activities/' + a.id + '/ai', 'POST', {
+      const { suggestion: v } = await api(base + '/ai', 'POST', {
         field: 'promotion',
+        ...(a.kind === 'organization'
+          ? { brief: { title: briefTitle, description: briefDescription } }
+          : {}),
       });
       if (!Array.isArray(v.slides) || v.slides.length < 1 || v.slides.length > 8)
         throw new Error('AI 구성안이 1~8장 범위를 벗어났습니다. 다시 요청해 주세요.');
       setSlides(
-        v.slides.map((s) => ({
+        v.slides.map((s, i) => ({
+          role: i === 0 ? 'cover' : 'content',
           title: String(s.title || '').slice(0, 100),
           body: String(s.body || '').slice(0, 400),
           visual: String(s.visual || '').slice(0, 2000),
@@ -99,7 +114,7 @@ export default function PromotionEditor({
       setApproved(false);
       notify(v.slides.length + '장으로 구성안을 추천했습니다. 문구를 검토해 주세요.');
     } catch (e) {
-      notify(e.message);
+      setGenerationError(e.message);
     } finally {
       setBusy('');
     }
@@ -107,7 +122,7 @@ export default function PromotionEditor({
   async function generateBackground() {
     setBusy('background');
     try {
-      const asset = await api('/activities/' + a.id + '/background', 'POST', {
+      const asset = await api(base + '/background', 'POST', {
         prompt: slide.visual || slide.title,
       });
       changeSlide('backgroundId', asset.id);
@@ -126,7 +141,7 @@ export default function PromotionEditor({
     setBusy('upload');
     try {
       const data = await prepareImage(file);
-      const asset = await api('/activities/' + a.id + '/assets', 'POST', { data });
+      const asset = await api(base + '/assets', 'POST', { data });
       changeSlide('backgroundId', asset.id);
       await refresh();
       notify('배경 사진을 업로드했습니다.');
@@ -151,34 +166,40 @@ export default function PromotionEditor({
           slides[i].backgroundId ? contentUrl(slides[i].backgroundId) : null,
           a,
         );
-        const asset = await api('/activities/' + a.id + '/assets', 'POST', { data });
+        const asset = await api(base + '/assets', 'POST', { data });
         ids.push(asset.id);
       }
       setAssetIds(ids);
       setChanged(true);
       setApproved(false);
-      await refresh();
-      notify('게시용 ' + ids.length + '장을 최적화해 R2에 저장했습니다.');
+      await persistDraft(ids);
+      notify('게시용 ' + ids.length + '장과 홍보 초안을 함께 저장했습니다. 아래에서 확인 후 게시해 주세요.');
     } catch (e) {
       notify(e.message);
     } finally {
       setBusy('');
     }
   }
-  async function save() {
-    setBusy('save');
-    try {
-      const next = await api('/activities/' + a.id + '/promotion', 'PUT', {
+  async function persistDraft(ids) {
+      const next = await api(base + '/promotion', 'PUT', {
         caption,
         hashtags,
         slides,
-        assetIds,
+        assetIds: ids,
         sourceVersion: a.version,
+        ...(a.kind === 'organization'
+          ? { brief: { title: briefTitle, description: briefDescription } }
+          : {}),
       });
       onSaved(next);
       await refresh();
       setChanged(false);
       setApproved(false);
+  }
+  async function save() {
+    setBusy('save');
+    try {
+      await persistDraft(assetIds);
       notify('홍보 초안을 저장했습니다.');
     } catch (e) {
       notify(e.message);
@@ -186,25 +207,49 @@ export default function PromotionEditor({
       setBusy('');
     }
   }
+  // Resume only this explicitly approved job; saving a draft never enters this flow.
+  useEffect(() => {
+    if (!p?.manual || !['scheduled', 'processing'].includes(p.status)) return;
+    let stopped = false;
+    const timer = setTimeout(
+      async () => {
+        try {
+          const next = await api(base + '/publish-step', 'POST', { jobId: p.jobId });
+          if (!stopped) {
+            setPublishError('');
+            onSaved(next);
+          }
+        } catch (e) {
+          if (!stopped) setPublishError(e.message + ' 게시 상태 확인을 눌러 이어서 확인해 주세요.');
+        }
+      },
+      Math.max(1200, Math.min(10000, (p.nextAt || 0) - Date.now())),
+    );
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [p, base]);
   async function publish() {
     setBusy('publish');
+    setPublishError('');
     try {
-      const next = await api('/activities/' + a.id + '/publish', 'POST', {
-        scheduledAt: at ? new Date(at).toISOString() : undefined,
+      const next = await api(base + '/publish', 'POST', {
+        approved: true,
+        reviewedAt: p.updatedAt,
       });
       onSaved(next);
-      await refresh();
-      notify(at ? '게시를 예약했습니다.' : '게시 요청을 접수했습니다. 처리 결과를 확인해 주세요.');
       setApproved(false);
+      notify('확인한 홍보물을 게시하고 있습니다. 처리 결과를 확인해 주세요.');
     } catch (e) {
-      notify(e.message);
+      setPublishError(e.message);
     } finally {
       setBusy('');
     }
   }
   function move(delta) {
     const to = index + delta;
-    if (to < 0 || to >= slides.length) return;
+    if (index === 0 || to < 1 || to >= slides.length) return;
     const next = [...slides];
     [next[index], next[to]] = [next[to], next[index]];
     setSlides(next);
@@ -216,19 +261,131 @@ export default function PromotionEditor({
   const disabled =
     !!busy ||
     dirty ||
+    p?.status === 'scheduled' ||
     p?.status === 'processing' ||
     p?.status === 'attention' ||
     p?.status === 'published';
+  const publishBlockReason = busy
+    ? '진행 중인 작업이 끝나면 게시할 수 있습니다.'
+    : dirty
+      ? '활동 기획의 변경 내용을 먼저 저장해 주세요.'
+      : !instagramReady
+        ? '단체 관리에서 Instagram 연결 설정을 저장해 주세요.'
+        : a.status !== 'confirmed'
+          ? '활동 기획을 확정한 후 게시할 수 있습니다.'
+          : !p
+            ? '게시용 이미지 생성·저장을 눌러 홍보 초안을 저장해 주세요.'
+            : ['published', 'scheduled', 'processing', 'attention'].includes(p.status)
+              ? ({ published: '이미 게시된 홍보물입니다.', scheduled: '게시 요청을 처리하고 있습니다.', processing: '게시 요청을 처리하고 있습니다.', attention: '게시 결과 확인이 필요합니다.' })[p.status]
+              : p.stale
+                ? '변경된 기획 내용을 검토하고 게시용 이미지 생성·저장을 눌러 주세요.'
+                : assetIds.length !== slides.length
+                  ? '게시용 이미지가 준비되지 않았습니다. 게시용 이미지 생성·저장을 눌러 주세요.'
+                  : changed || p.assets?.length !== slides.length
+                    ? '홍보 초안 저장을 눌러 현재 이미지와 게시글을 반영해 주세요.'
+                    : !approved
+                      ? '저장된 피드를 확인하고 게시 동의에 체크해 주세요.'
+                      : '';
   return (
     <>
+      {a.kind === 'organization' && (
+        <fieldset disabled={disabled} className="panel form-panel spaced">
+          <h2>홍보 목적·컨셉 수정</h2>
+          <Button
+            disabled={disabled || !briefTitle.trim() || !briefDescription.trim()}
+            onClick={async () => {
+              setBusy('brief');
+              try {
+                const next = await api(base + '/brief', 'PUT', {
+                  title: briefTitle,
+                  description: briefDescription,
+                  version: a.version,
+                });
+                onSaved(next);
+                await refresh();
+                setApproved(false);
+                notify(
+                  '입력 내용을 저장했습니다. 홍보 문구와 게시글은 별도로 검토하고 저장해 주세요.',
+                );
+              } catch (e) {
+                notify(e.message);
+              } finally {
+                setBusy('');
+              }
+            }}
+          >
+            입력 내용 저장
+          </Button>
+
+          <Field label="홍보 제목">
+            <input
+              maxLength={100}
+              value={briefTitle}
+              onChange={(e) => {
+                setBriefTitle(e.target.value);
+                setChanged(true);
+                setApproved(false);
+              }}
+            />
+          </Field>
+          <Field label="단체 소개와 홍보 목적·컨셉">
+            <textarea
+              rows={6}
+              maxLength={4000}
+              value={briefDescription}
+              onChange={(e) => {
+                setBriefDescription(e.target.value);
+                setChanged(true);
+                setApproved(false);
+              }}
+            />
+          </Field>
+          <p className="helper">
+            내용을 수정하고 아래 AI 초안 다시 만들기를 누르세요. 새 결과를 검토하고 홍보 초안을
+            저장할 때 기존 저장본을 대체합니다. AI 생성에는 API 비용이 발생합니다.
+          </p>
+        </fieldset>
+      )}
+      {generationError && (
+        <p className="warning" role="alert">
+          {generationError} 기존 초안과 입력 내용은 유지됩니다.
+        </p>
+      )}
+      {changed && a.kind === 'organization' && (
+        <p className="warning">
+          검토 중인 변경 사항입니다. 저장하기 전까지 기존 저장본은 유지됩니다.
+        </p>
+      )}
+      {needsCover && (
+        <p className="warning">
+          기존 본문 앞에 표지를 추가했습니다. 표지를 확인하고 게시용 이미지를 다시 생성·저장해
+          주세요.
+        </p>
+      )}
+      {slides.length > 8 && (
+        <p className="warning">
+          표지를 포함해 최대 8장입니다. 기존 내용을 합치거나 본문 한 장을 삭제한 뒤 저장해 주세요.
+        </p>
+      )}
       <div className="promotion-intro">
         <div>
-          <h2>활동을 알리는 한 장부터</h2>
-          <p>정보량에 맞게 1~8장으로 구성하고, 문구와 이미지를 직접 다듬으세요.</p>
+          <h2>
+            {a.kind === 'organization' ? '우리 단체를 소개하는 피드' : '활동을 알리는 한 장부터'}
+          </h2>
+          <p>첫 장은 표지, 다음 장부터 상세 안내입니다. 표지를 포함해 최대 8장으로 구성합니다.</p>
         </div>
-        <Button kind="primary" disabled={disabled} busy={busy === 'plan'} onClick={generatePlan}>
+        <Button
+          kind="primary"
+          disabled={
+            disabled ||
+            !settings.secrets?.aiKey ||
+            (a.kind === 'organization' && (!briefTitle.trim() || !briefDescription.trim()))
+          }
+          busy={busy === 'plan'}
+          onClick={generatePlan}
+        >
           <Sparkles size={17} />
-          AI 구성안 추천
+          {a.kind === 'organization' ? 'AI 초안 다시 만들기' : 'AI 구성안 추천'}
         </Button>
       </div>
       {dirty && <div className="warning">기획안 변경 사항을 먼저 저장해 주세요.</div>}
@@ -238,7 +395,7 @@ export default function PromotionEditor({
         </div>
       )}
       <div className="promotion-layout">
-        <section className="panel form-panel">
+        <fieldset disabled={disabled} className="panel form-panel">
           <div className="section-heading">
             <h2>
               이미지 구성 <span className="helper">{slides.length} / 8장</span>
@@ -259,19 +416,26 @@ export default function PromotionEditor({
           <div className="slide-tabs">
             {slides.map((s, i) => (
               <button key={i} className={index === i ? 'active' : ''} onClick={() => setIndex(i)}>
-                {String(i + 1).padStart(2, '0')}
+                {i === 0 && s.role === 'cover' ? '01 표지' : String(i + 1).padStart(2, '0')}
               </button>
             ))}
           </div>
           <div className="content-fields">
-            <Field label="이 장의 제목">
+            <Field label={slide.role === 'cover' ? '표지 제목' : '이 장의 제목'}>
               <input
                 value={slide.title}
                 maxLength={100}
                 onChange={(e) => changeSlide('title', e.target.value)}
               />
             </Field>
-            <Field label="본문" hint="읽기 쉬운 크기를 유지하도록 긴 내용은 여러 장으로 나누세요.">
+            <Field
+              label={slide.role === 'cover' ? '표지 소개 문구' : '본문'}
+              hint={
+                slide.role === 'cover'
+                  ? '표지는 짧은 제목과 한두 줄 소개로 구성하세요. 상세 안내는 다음 장에 작성합니다.'
+                  : '읽기 쉬운 크기를 유지하도록 긴 내용은 여러 장으로 나누세요.'
+              }
+            >
               <textarea
                 value={slide.body}
                 maxLength={400}
@@ -280,13 +444,13 @@ export default function PromotionEditor({
               />
             </Field>
             <div className="inline wrap">
-              <Button kind="small" disabled={index === 0 || disabled} onClick={() => move(-1)}>
+              <Button kind="small" disabled={index <= 1 || disabled} onClick={() => move(-1)}>
                 <ChevronLeft size={15} />
                 앞으로
               </Button>
               <Button
                 kind="small"
-                disabled={index === slides.length - 1 || disabled}
+                disabled={index === 0 || index === slides.length - 1 || disabled}
                 onClick={() => move(1)}
               >
                 뒤로
@@ -294,7 +458,7 @@ export default function PromotionEditor({
               </Button>
               <Button
                 kind="small danger"
-                disabled={slides.length <= 1 || disabled}
+                disabled={index === 0 || slides.length <= 1 || disabled}
                 onClick={() => {
                   setSlides(slides.filter((_, i) => i !== index));
                   setIndex(Math.max(0, index - 1));
@@ -349,7 +513,7 @@ export default function PromotionEditor({
               사용해 주세요.
             </p>
           </div>
-        </section>
+        </fieldset>
         <section className="artwork-preview">
           <canvas ref={canvas} aria-label={'홍보 이미지 ' + (index + 1) + ' 미리보기'} />
           {previewError && <div className="warning">{previewError}</div>}
@@ -378,13 +542,13 @@ export default function PromotionEditor({
             현재 이미지 다운로드
           </Button>
           <p className="helper">
-            글자는 편집 가능한 텍스트로 배치합니다.
+            배경 원본 색감을 유지하며 밝기에 맞춰 글자색을 적용합니다.
             <br />
             게시용 저장 시 JPEG 압축을 적용합니다.
           </p>
         </section>
       </div>
-      <section className="panel form-panel spaced">
+      <fieldset disabled={disabled} className="panel form-panel spaced">
         <div className="section-heading">
           <h2>캡션과 해시태그</h2>
           <small>{caption.length + hashtags.length + 2} / 2,200자</small>
@@ -421,7 +585,7 @@ export default function PromotionEditor({
               : '이미지 구성을 확정한 뒤 게시용 이미지를 저장하세요.'}
           </span>
           <Button
-            disabled={disabled || !settings.secrets.r2SecretAccessKey}
+            disabled={disabled || slides.length > 8 || !settings.secrets.r2SecretAccessKey}
             busy={busy.startsWith('render')}
             onClick={renderImages}
           >
@@ -430,18 +594,68 @@ export default function PromotionEditor({
               ? busy.replace('render', '저장 중')
               : '게시용 ' + slides.length + '장 생성·저장'}
           </Button>
-          <Button kind="primary" disabled={disabled} busy={busy === 'save'} onClick={save}>
+          <Button
+            kind="primary"
+            disabled={disabled || slides.length > 8}
+            busy={busy === 'save'}
+            onClick={save}
+          >
             <Save size={17} />
             홍보 초안 저장
           </Button>
         </div>
-      </section>
+      </fieldset>
       <section className="panel form-panel spaced">
         <div className="section-heading">
           <h2>인스타그램 게시</h2>
           {p && <Badge status={p.status} />}
         </div>
-        {p?.error && <p className="warning">{p.error}</p>}
+        {!instagramReady && (
+          <p className="warning">
+            단체 관리에서 Instagram 계정 ID, 액세스 토큰, API 버전을 저장하면 게시 버튼을 사용할 수
+            있습니다. 초안과 이미지는 먼저 준비할 수 있습니다.
+          </p>
+        )}
+        {publishError && (
+          <p className="warning" role="alert">
+            {publishError}
+          </p>
+        )}
+        {p?.error && (
+          <p className="warning" role="alert">
+            {p.error}
+          </p>
+        )}
+        {p?.status === 'published' && <p role="status">Instagram 게시가 완료되었습니다.</p>}
+        {p?.manual && ['scheduled', 'processing'].includes(p.status) && (
+          <p role="status">
+            Instagram에서 이미지를 준비하고 게시하고 있습니다. 화면을 닫았다면 이 홍보물을 다시 열어
+            결과를 확인해 주세요.
+          </p>
+        )}
+        {p?.assets?.length > 0 && (
+          <div className="saved-feed-preview">
+            <h3>저장된 피드 미리보기</h3>
+            <div className="feed-images">
+              {p.assets.map((asset, i) => (
+                <a key={asset.id} href={contentUrl(asset.id)} target="_blank" rel="noreferrer">
+                  <img src={contentUrl(asset.id)} alt={'게시할 이미지 ' + (i + 1)} loading="lazy" />
+                </a>
+              ))}
+            </div>
+            <p className="feed-caption">
+              {p.caption}
+              {'\n\n'}
+              {p.hashtags}
+            </p>
+            {changed && (
+              <p className="warning">
+                편집 내용이 아직 반영되지 않았습니다. 게시용 이미지와 홍보 초안을 저장한 후 확인해
+                주세요.
+              </p>
+            )}
+          </div>
+        )}
         {p?.status === 'attention' && (
           <div className="inline wrap spaced">
             {[
@@ -458,7 +672,7 @@ export default function PromotionEditor({
                   )
                     return;
                   try {
-                    const next = await api('/activities/' + a.id + '/resolve-publish', 'POST', {
+                    const next = await api(base + '/resolve-publish', 'POST', {
                       published,
                     });
                     onSaved(next);
@@ -479,7 +693,7 @@ export default function PromotionEditor({
             onClick={async () => {
               if (!confirm('기존 게시 이력을 보관하고 새 홍보물을 만들까요?')) return;
               try {
-                const next = await api('/activities/' + a.id + '/new-promotion', 'POST', {});
+                const next = await api(base + '/new-promotion', 'POST', {});
                 onSaved(next);
                 await refresh();
               } catch (e) {
@@ -502,50 +716,38 @@ export default function PromotionEditor({
           </p>
         )}
         <div className="publish-controls">
-          <Field label="예약 시간" hint="비워두면 게시 요청 후 처리합니다.">
-            <input type="datetime-local" value={at} onChange={(e) => setAt(e.target.value)} />
-          </Field>
           <div>
             <label className="checkbox">
               <input
                 type="checkbox"
-                checked={approved}
+                checked={consentRecorded || approved}
+                disabled={consentRecorded || !!busy}
                 onChange={(e) => setApproved(e.target.checked)}
               />
-              게시 계정, 이미지, 날짜·장소, 신청 안내를 확인했습니다.
+              {consentRecorded ? '저장된 이미지와 게시글, 대상 계정에 대한 게시 동의가 완료되었습니다.' : '저장된 이미지와 게시글, 대상 계정을 확인했으며 게시에 동의합니다.'}
             </label>
             <p className="helper">
-              대상 계정 ID: {settings.instagramUserId || '단체 관리에서 설정 필요'}
+              대상 계정 ID: {(consentRecorded ? p.targetInstagramId : settings.instagramUserId) || '단체 관리에서 설정 필요'}
               <br />
-              기획 확정 및 최신 홍보물 저장 후 게시할 수 있습니다.
+              {publishBlockReason || '저장된 피드로 게시할 준비가 되었습니다.'}
             </p>
           </div>
         </div>
         <div className="inline wrap">
           <Button
             kind="primary"
-            disabled={
-              disabled ||
-              changed ||
-              !approved ||
-              a.status !== 'confirmed' ||
-              !p ||
-              p.stale ||
-              p.assets?.length !== slides.length ||
-              !settings.secrets.instagramToken ||
-              ['published', 'scheduled', 'processing', 'attention'].includes(p.status)
-            }
+            disabled={!!publishBlockReason}
             busy={busy === 'publish'}
             onClick={publish}
           >
             <Send size={17} />
-            {at ? '예약 게시' : '지금 게시'}
+            Instagram에 게시
           </Button>
           {p?.status === 'scheduled' && (
             <Button
               onClick={async () => {
                 try {
-                  const next = await api('/activities/' + a.id + '/unpublish', 'POST', {});
+                  const next = await api(base + '/unpublish', 'POST', {});
                   onSaved(next);
                   await refresh();
                   notify('게시 예약을 취소했습니다.');
@@ -558,9 +760,32 @@ export default function PromotionEditor({
             </Button>
           )}
           <Button
+            disabled={!!busy}
+            busy={busy === 'status'}
             onClick={async () => {
-              const d = await refresh();
-              onSaved(d.activities.find((x) => x.id === a.id));
+              setBusy('status');
+              setPublishError('');
+              try {
+                const d = await refresh();
+                const next = (a.kind === 'organization' ? d.promotions : d.activities).find(
+                  (x) => x.id === a.id,
+                );
+                if (!next) throw new Error('홍보물을 찾을 수 없습니다. 목록에서 다시 확인해 주세요.');
+                onSaved(next);
+                const messages = {
+                  published: 'Instagram 게시 완료 상태를 확인했습니다.',
+                  scheduled: '게시 요청이 접수되었습니다. 이 화면에서 진행 상태를 확인합니다.',
+                  processing: 'Instagram 게시 처리 중입니다.',
+                  attention: '게시 결과 확인이 필요합니다. Instagram에서 실제 게시 여부를 확인해 주세요.',
+                  failed: '게시 실패 상태입니다. 화면의 오류 안내를 확인해 주세요.',
+                  draft: '저장된 초안입니다. 아직 게시되지 않았습니다.',
+                };
+                notify(messages[next.promotion?.status] || '아직 게시 요청이 없습니다.');
+              } catch (e) {
+                setPublishError(e.message);
+              } finally {
+                setBusy('');
+              }
             }}
           >
             <RefreshCw size={16} />

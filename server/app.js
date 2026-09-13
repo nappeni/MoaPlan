@@ -24,6 +24,7 @@ export async function createApp({
   appUrl = (process.env.APP_URL || 'http://localhost:5173').replace(/\/$/, ''),
   store = new Store(),
   initializeStore = true,
+  aiText = integration.aiText,
 } = {}) {
   if (
     production &&
@@ -70,7 +71,7 @@ export async function createApp({
     setCookie(res, v);
   }
   const rate = wrap(async (req, res, next) => {
-    if (!await consumeAttempt(store, hash(req.ip || 'unknown'))) {
+    if (!(await consumeAttempt(store, hash(req.ip || 'unknown')))) {
       res.setHeader('Retry-After', '900');
       return res.status(429).json({ error: '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.' });
     }
@@ -180,6 +181,93 @@ export async function createApp({
     if (!a) throw fail('활동을 찾을 수 없습니다.', 404);
     return a;
   }
+  function promotionEntry(req, o) {
+    if (!req.path.startsWith('/api/promotions/')) return activity(o, req.params.id);
+    const item = (o.promotions || []).find((a) => a.id === req.params.id);
+    if (!item) throw fail('단체 홍보를 찾을 수 없습니다.', 404);
+    return item;
+  }
+  const briefSchema = z.object({
+    title: z.string().trim().min(1).max(100),
+    description: z.string().trim().min(1).max(4000),
+  });
+  const suggestionSchema = z
+    .object({
+      caption: z.string().max(2200),
+      hashtags: z.string().max(1000),
+      slides: z
+        .array(
+          z.object({
+            role: z.enum(['cover', 'content']).optional(),
+            title: z.string().max(100),
+            body: z.string().max(400),
+            visual: z.string().max(2000).default(''),
+          }),
+        )
+        .min(1)
+        .max(8),
+    })
+    .refine((v) => (v.caption + '\n\n' + v.hashtags).length <= 2200);
+  app.post(
+    '/api/promotions/preview',
+    wrap(async (req, res) => {
+      const brief = briefSchema.parse(req.body);
+      const settings = await reserveAI(req);
+      const suggestion = suggestionSchema.parse(
+        await aiText(settings, { ...brief, kind: 'organization' }, 'promotion', true),
+      );
+      res.json({ suggestion });
+    }),
+  );
+  app.post(
+    '/api/promotions',
+    wrap(async (req, res) => {
+      const data = z
+        .object({
+          title: z.string().trim().min(1).max(100),
+          description: z.string().trim().min(1).max(4000),
+        })
+        .parse(req.body);
+      res.status(201).json(
+        await orgWrite(req, (o) => {
+          const a = {
+            ...data,
+            kind: 'organization',
+            status: 'confirmed',
+            version: 1,
+            assets: [],
+            createdAt: new Date().toISOString(),
+          };
+          a.id = randomUUID();
+          (o.promotions ||= []).push(a);
+          return a;
+        }),
+      );
+    }),
+  );
+  app.put(
+    '/api/promotions/:id/brief',
+    wrap(async (req, res) => {
+      const brief = briefSchema.parse(req.body);
+      const version = z.number().int().parse(req.body.version);
+      res.json(
+        await orgWrite(req, (o) => {
+          const a = promotionEntry(req, o);
+          editable(a);
+          if (['scheduled', 'published'].includes(a.promotion?.status))
+            throw fail('예약을 취소하거나 새 홍보를 만든 후 수정해 주세요.', 409);
+          if (a.version !== version)
+            throw fail('다른 화면에서 수정되었습니다. 최신 내용을 불러온 후 저장해 주세요.', 409);
+          if (a.title !== brief.title || a.description !== brief.description) {
+            Object.assign(a, brief);
+            a.version++;
+            if (a.promotion) a.promotion.stale = true;
+          }
+          return a;
+        }),
+      );
+    }),
+  );
   function editable(a) {
     if (a.promotion?.status === 'attention')
       throw fail('먼저 Instagram 게시 여부를 확인해 결과를 기록해 주세요.', 409);
@@ -206,6 +294,7 @@ export async function createApp({
         await orgRead(req, (o) => ({
           settings: settingsView(o),
           activities: o.activities,
+          promotions: o.promotions || [],
           venues: o.venues,
           usage: o.usage,
         })),
@@ -295,6 +384,7 @@ export async function createApp({
           exportedAt: new Date().toISOString(),
           settings: o.settings,
           activities: o.activities,
+          promotions: o.promotions || [],
           venues: o.venues,
         })),
       );
@@ -401,23 +491,32 @@ export async function createApp({
     });
   }
   app.post(
-    '/api/activities/:id/ai',
+    ['/api/activities/:id/ai', '/api/promotions/:id/ai'],
     wrap(async (req, res) => {
       const field = z.enum(['all', ...editableAI, 'promotion']).parse(req.body.field || 'all');
-      const a = await orgRead(req, (o) => activity(o, req.params.id));
+      const a = await orgRead(req, (o) => promotionEntry(req, o));
       const s = await reserveAI(req);
-      const result = await integration.aiText(s, a, field, field === 'promotion');
+      const brief =
+        a.kind === 'organization' && req.body.brief ? briefSchema.parse(req.body.brief) : null;
+      if (a.kind === 'organization') {
+        editable(a);
+        if (['scheduled', 'published'].includes(a.promotion?.status))
+          throw fail('게시 상태를 확인한 후 새 홍보를 만들어 주세요.', 409);
+      }
+      const result = await aiText(s, brief ? { ...a, ...brief } : a, field, field === 'promotion');
+      if (a.kind === 'organization') suggestionSchema.parse(result);
       res.json({ suggestion: result, sourceVersion: a.version });
     }),
   );
   const slideSchema = z.object({
+    role: z.enum(['cover', 'content']).optional(),
     title: z.string().max(100),
     body: z.string().max(400),
     visual: z.string().max(2000).default(''),
     backgroundId: z.string().optional(),
   });
   app.put(
-    '/api/activities/:id/promotion',
+    ['/api/activities/:id/promotion', '/api/promotions/:id/promotion'],
     wrap(async (req, res) => {
       const data = z
         .object({
@@ -426,13 +525,14 @@ export async function createApp({
           slides: z.array(slideSchema).min(1).max(8),
           assetIds: z.array(z.string()).max(8),
           sourceVersion: z.number().int(),
+          brief: briefSchema.optional(),
         })
         .parse(req.body);
       if ((data.caption + '\n\n' + data.hashtags).length > 2200)
         throw fail('캡션과 해시태그를 합쳐 2,200자 이내로 작성해 주세요.');
       res.json(
         await orgWrite(req, (o) => {
-          const a = activity(o, req.params.id);
+          const a = promotionEntry(req, o);
           editable(a);
           if (a.promotion?.status === 'published')
             throw fail('이미 게시된 홍보물입니다. 새 홍보 만들기를 선택해 주세요.', 409);
@@ -446,8 +546,18 @@ export async function createApp({
           for (const slide of data.slides)
             if (slide.backgroundId && !a.assets.some((v) => v.id === slide.backgroundId))
               throw fail('배경 이미지를 찾을 수 없습니다.');
+          if (
+            a.kind === 'organization' &&
+            data.brief &&
+            (a.title !== data.brief.title || a.description !== data.brief.description)
+          ) {
+            Object.assign(a, data.brief);
+            a.version += 1;
+          }
+          const { brief, ...promotionData } = data;
           a.promotion = {
-            ...data,
+            ...promotionData,
+            sourceVersion: a.version,
             assets,
             status: 'draft',
             stale: false,
@@ -459,42 +569,42 @@ export async function createApp({
     }),
   );
   app.post(
-    '/api/activities/:id/assets',
+    ['/api/activities/:id/assets', '/api/promotions/:id/assets'],
     wrap(async (req, res) => {
       const data = z.object({ data: z.string().max(23000000) }).parse(req.body);
       if (!/^data:image\/(png|jpeg|webp);base64,/.test(data.data))
         throw fail('PNG, JPEG, WebP 이미지만 업로드할 수 있습니다.');
       const o = await orgRead(req, (o) => o);
-      activity(o, req.params.id);
+      promotionEntry(req, o);
       const asset = await integration.uploadImage(
         integration.credentials(o, key),
         o.id,
         req.params.id,
         Buffer.from(data.data.split(',')[1], 'base64'),
       );
-      await orgWrite(req, (o) => activity(o, req.params.id).assets.push(asset));
+      await orgWrite(req, (o) => promotionEntry(req, o).assets.push(asset));
       res.json(asset);
     }),
   );
   app.post(
-    '/api/activities/:id/background',
+    ['/api/activities/:id/background', '/api/promotions/:id/background'],
     wrap(async (req, res) => {
       const prompt = z.string().min(1).max(3000).parse(req.body.prompt);
       const o = await orgRead(req, (o) => o);
-      activity(o, req.params.id);
+      promotionEntry(req, o);
       const s = await reserveAI(req);
       integration.r2(s);
       const buffer = await integration.aiImage(s, prompt);
       const asset = await integration.uploadImage(s, o.id, req.params.id, buffer);
-      await orgWrite(req, (o) => activity(o, req.params.id).assets.push(asset));
+      await orgWrite(req, (o) => promotionEntry(req, o).assets.push(asset));
       res.json(asset);
     }),
   );
   app.get(
-    '/api/activities/:id/assets/:assetId/content',
+    ['/api/activities/:id/assets/:assetId/content', '/api/promotions/:id/assets/:assetId/content'],
     wrap(async (req, res) => {
       const o = await orgRead(req, (o) => o);
-      const asset = activity(o, req.params.id).assets.find((a) => a.id === req.params.assetId);
+      const asset = promotionEntry(req, o).assets.find((a) => a.id === req.params.assetId);
       if (!asset) throw fail('이미지를 찾을 수 없습니다.', 404);
       const url = await integration.imageUrl(integration.credentials(o, key), asset.key);
       const upstream = await fetch(url, { signal: AbortSignal.timeout(30000) });
@@ -503,10 +613,10 @@ export async function createApp({
     }),
   );
   app.get(
-    '/api/activities/:id/assets/:assetId',
+    ['/api/activities/:id/assets/:assetId', '/api/promotions/:id/assets/:assetId'],
     wrap(async (req, res) => {
       const o = await orgRead(req, (o) => o);
-      const asset = activity(o, req.params.id).assets.find((a) => a.id === req.params.assetId);
+      const asset = promotionEntry(req, o).assets.find((a) => a.id === req.params.assetId);
       if (!asset) throw fail('이미지를 찾을 수 없습니다.', 404);
       res.json({
         url: await integration.imageUrl(
@@ -633,11 +743,11 @@ export async function createApp({
     }),
   );
   app.post(
-    '/api/activities/:id/publish',
+    ['/api/activities/:id/publish', '/api/promotions/:id/publish'],
     wrap(async (req, res) => {
       res.json(
         await orgWrite(req, (o) => {
-          const a = activity(o, req.params.id);
+          const a = promotionEntry(req, o);
           editable(a);
           const p = a.promotion;
           if (a.status !== 'confirmed') throw fail('활동 기획을 확정한 뒤 게시해 주세요.');
@@ -652,30 +762,53 @@ export async function createApp({
           if (['published', 'scheduled', 'attention'].includes(p.status))
             throw fail('이미 게시되었거나 예약 또는 결과 확인이 필요한 홍보물입니다.');
           const s = integration.credentials(o, key);
-          if (!s.instagramToken || !s.instagramUserId)
+          if (
+            !s.instagramToken ||
+            !/^\d+$/.test(s.instagramUserId) ||
+            !/^v\d+\.\d+$/.test(s.graphVersion)
+          )
             throw fail('인스타그램 계정을 먼저 설정해 주세요.');
-          if (process.env.MOAPLAN_WORKER_ENABLED !== 'true')
-            throw fail('자동 게시가 아직 활성화되지 않았습니다. 연결 검증 후 사용할 수 있습니다.', 503);
+          if (req.body.approved !== true || req.body.reviewedAt !== p.updatedAt)
+            throw fail('저장된 이미지와 게시글을 다시 확인하고 게시해 주세요.', 409);
+          if (req.body.scheduledAt && process.env.MOAPLAN_WORKER_ENABLED !== 'true')
+            throw fail(
+              '자동 게시가 아직 활성화되지 않았습니다. 연결 검증 후 사용할 수 있습니다.',
+              503,
+            );
           const at = req.body.scheduledAt ? new Date(req.body.scheduledAt) : new Date();
           if (!Number.isFinite(at.getTime()) || (req.body.scheduledAt && at.getTime() < Date.now()))
             throw fail('미래의 예약 시간을 선택해 주세요.');
+          p.approval = { userId: req.user.id, approvedAt: new Date().toISOString(), reviewedAt: p.updatedAt };
+          p.manual = !req.body.scheduledAt;
           p.status = 'scheduled';
           p.scheduledAt = at.toISOString();
           p.targetInstagramId = s.instagramUserId;
           p.jobId = randomUUID();
-          for (const field of ['stage','leaseId','leaseUntil','nextAt','containers','assetIndex','currentContainer','containerId','startedAt','error']) delete p[field];
+          for (const field of [
+            'stage',
+            'leaseId',
+            'leaseUntil',
+            'nextAt',
+            'containers',
+            'assetIndex',
+            'currentContainer',
+            'containerId',
+            'startedAt',
+            'error',
+          ])
+            delete p[field];
           return a;
         }),
       );
     }),
   );
   app.post(
-    '/api/activities/:id/resolve-publish',
+    ['/api/activities/:id/resolve-publish', '/api/promotions/:id/resolve-publish'],
     wrap(async (req, res) => {
       const data = z.object({ published: z.boolean() }).parse(req.body);
       res.json(
         await orgWrite(req, (o) => {
-          const a = activity(o, req.params.id);
+          const a = promotionEntry(req, o);
           const p = a.promotion;
           if (p?.status !== 'attention') throw fail('게시 결과 확인이 필요한 상태가 아닙니다.');
           p.status = data.published ? 'published' : 'failed';
@@ -687,11 +820,11 @@ export async function createApp({
     }),
   );
   app.post(
-    '/api/activities/:id/new-promotion',
+    ['/api/activities/:id/new-promotion', '/api/promotions/:id/new-promotion'],
     wrap(async (req, res) => {
       res.json(
         await orgWrite(req, (o) => {
-          const a = activity(o, req.params.id);
+          const a = promotionEntry(req, o);
           editable(a);
           if (a.promotion?.status === 'scheduled') throw fail('예약을 먼저 취소해 주세요.');
           if (a.promotion) {
@@ -704,11 +837,11 @@ export async function createApp({
     }),
   );
   app.post(
-    '/api/activities/:id/unpublish',
+    ['/api/activities/:id/unpublish', '/api/promotions/:id/unpublish'],
     wrap(async (req, res) => {
       res.json(
         await orgWrite(req, (o) => {
-          const a = activity(o, req.params.id);
+          const a = promotionEntry(req, o);
           editable(a);
           if (a.promotion?.status === 'published' || a.promotion?.status === 'attention')
             throw fail('이미 게시되었거나 결과 확인이 필요한 상태입니다.');
@@ -718,8 +851,34 @@ export async function createApp({
       );
     }),
   );
+  app.post(
+    ['/api/activities/:id/publish-step', '/api/promotions/:id/publish-step'],
+    wrap(async (req, res) => {
+      const a = await orgRead(req, (o) => promotionEntry(req, o));
+      const jobId = z.string().min(1).parse(req.body.jobId);
+      if (!a.promotion?.manual || a.promotion.jobId !== jobId)
+        throw fail('게시 요청이 변경되었습니다. 최신 상태를 확인해 주세요.', 409);
+      await runPublishStep(
+        store,
+        (org) => integration.credentials(org, key),
+        integration.instagramSteps,
+        Date.now(),
+        {
+          orgId: req.user.orgId,
+          entryId: a.id,
+          jobId,
+          collection: a.kind === 'organization' ? 'promotions' : 'activities',
+        },
+      );
+      res.json(await orgRead(req, (o) => promotionEntry(req, o)));
+    }),
+  );
   async function work() {
-    return runPublishStep(store, org => integration.credentials(org, key), integration.instagramSteps);
+    return runPublishStep(
+      store,
+      (org) => integration.credentials(org, key),
+      integration.instagramSteps,
+    );
   }
   app.use('/api', (req, res) => res.status(404).json({ error: '지원하지 않는 요청입니다.' }));
   app.use((err, req, res, next) => {

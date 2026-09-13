@@ -1,0 +1,40 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {createApp} from '../server/app.js';
+import {Store} from '../server/store.js';
+test('AI brief previews preserve saved content until explicit save, including failure and stale edits',async t=>{
+ const dir=await mkdtemp(join(tmpdir(),'moaplan-brief-'));
+ const store=new Store({url:'',dir});let failAI=false;let input;
+ const {app}=await createApp({production:false,appUrl:'http://localhost',store,aiText:async(_s,a)=>{input=a;if(failAI)throw new Error('mock failure');return {caption:a.description,hashtags:'#소개',slides:[{title:a.title,body:a.description,visual:'따뜻한 배경'}]};}});
+ const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));
+ t.after(async()=>{await new Promise(r=>server.close(r));await store.close();await rm(dir,{recursive:true,force:true});});
+ let cookie='';
+ async function req(path,method='GET',body){const res=await fetch('http://127.0.0.1:'+server.address().port+'/api'+path,{method,headers:{Origin:'http://localhost',Cookie:cookie,'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});if(res.headers.get('set-cookie'))cookie=res.headers.get('set-cookie').split(';')[0];return {status:res.status,data:await res.json()};}
+ await req('/setup','POST',{name:'검증',organization:'검증 단체',email:'test@example.test',password:'local-test-password',setupToken:process.env.SETUP_TOKEN || ''});
+ await req('/settings','PUT',{settings:{},secrets:{aiKey:'test-placeholder'}});
+ const brief={title:'단체 소개',description:'따뜻한 분위기로 참여를 안내'};
+ const initial=await req('/promotions/preview','POST',brief);
+ assert.equal(initial.status,200);assert.equal(input.description,brief.description);
+ assert.equal((await req('/data')).data.promotions.length,0);
+ const made=await req('/promotions','POST',brief);const base='/promotions/'+made.data.id;
+ const draft={...initial.data.suggestion,assetIds:[],sourceVersion:1,brief};
+ const saved=await req(base+'/promotion','PUT',draft);assert.equal(saved.status,200);
+ const changed={title:'새 소개',description:'밝고 경쾌한 컨셉'};
+ const next=await req(base+'/ai','POST',{field:'promotion',brief:changed});
+ assert.equal(next.status,200);assert.equal(input.description,changed.description);
+ let persisted=(await req('/data')).data.promotions[0];
+ assert.equal(persisted.description,brief.description);assert.deepEqual(persisted.promotion,saved.data.promotion);
+ failAI=true;assert.equal((await req(base+'/ai','POST',{field:'promotion',brief:changed})).status,500);
+ persisted=(await req('/data')).data.promotions[0];assert.deepEqual(persisted.promotion,saved.data.promotion);
+ const accepted=await req(base+'/promotion','PUT',{...next.data.suggestion,assetIds:[],sourceVersion:1,brief:changed});
+ assert.equal(accepted.status,200);assert.equal(accepted.data.version,2);assert.equal(accepted.data.description,changed.description);assert.equal(accepted.data.promotion.caption,changed.description);assert.equal(accepted.data.promotion.status,'draft');
+ assert.equal((await req(base+'/promotion','PUT',draft)).status,409);
+ const independent=await req(base+'/brief','PUT',{title:'목적 저장',description:'AI 없이 수정',version:2});
+ assert.equal(independent.status,200);assert.equal(independent.data.version,3);
+ assert.equal(independent.data.promotion.caption,changed.description);assert.equal(independent.data.promotion.stale,true);
+ assert.equal((await req(base+'/brief','PUT',{...brief,version:2})).status,409);
+
+});
